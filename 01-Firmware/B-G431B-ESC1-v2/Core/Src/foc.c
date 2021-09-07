@@ -63,7 +63,7 @@ static float present_Iq_filtered = 0.0f;
 // foc feedback
 static float absolute_position_rad = 0.0f;
 // foc analog measure
-static float potentiometer_input_adc = 0.0f;
+volatile float potentiometer_input_adc = 0.0f;
 static float vbus_input_adc = 0.0f;
 static float temperature_input_adc = 0.0f;
 static float present_voltage_V = 0.0f;

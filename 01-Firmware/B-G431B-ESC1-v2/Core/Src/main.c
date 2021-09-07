@@ -54,7 +54,7 @@
 // Autocalibration at startup
 //   uncomment this line for calibrating the ESC/MOTOR at startup
 //   comment this line to avoid wearing EEPROM
-//#define PERFORM_AUTO_CALIBRATION_AT_STARTUP
+#define PERFORM_AUTO_CALIBRATION_AT_STARTUP
 
 // Advanced settings (do not change)
 #define ALPHA_VELOCITY				0.24f // (default:0.24) F = 1000Hz ==> Fc (-3dB) = 20Hz
@@ -69,6 +69,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+extern volatile float potentiometer_input_adc;
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
 DMA_HandleTypeDef hdma_adc1;
@@ -489,6 +490,65 @@ int main(void)
 				}
 			}
 			break;
+		case REG_CONTROL_MODE_ONBOARD_JOYSTICK_POSITION:
+		  if(last_mode!=REG_CONTROL_MODE_ONBOARD_JOYSTICK_POSITION){
+		      // set goal position to present position to avoid mechanical glicth
+		      regs[REG_GOAL_POSITION_DEG_L] = LOW_BYTE((int16_t)(10.0f*positionSensor_getDegreeMultiturn()));
+		      regs[REG_GOAL_POSITION_DEG_H] = HIGH_BYTE((int16_t)(10.0f*positionSensor_getDegreeMultiturn()));
+		      // reset goal velocity
+		      regs[REG_GOAL_VELOCITY_DPS_L] = 0;
+		      regs[REG_GOAL_VELOCITY_DPS_H] = 0;
+		      // reset feed-forward torque
+		      regs[REG_GOAL_TORQUE_CURRENT_MA_L] = 0;
+		      regs[REG_GOAL_TORQUE_CURRENT_MA_H] = 0;
+		      // reset flux refenrece
+		      regs[REG_GOAL_FLUX_CURRENT_MA_L] = 0;
+		      regs[REG_GOAL_FLUX_CURRENT_MA_H] = 0;
+		      // reset setpoints
+		      setpoint_position_deg = 0.0f;
+		      setpoint_velocity_dps = 0.0f;
+		      error_velocity_dps = 0.0f;
+		      setpoint_torque_current_mA = 0.0f;
+		      setpoint_flux_current_mA = 0.0f;
+		      // set setpoint_position_deg to avoid glitch
+		      setpoint_position_deg = positionSensor_getDegreeMultiturn();
+
+		  }
+		  // compute position set-point from goal and EEPROM position limits
+		  float const goal_position_deg = (float)((int16_t)(potentiometer_input_adc))/11.111f;
+		  float const reg_min_position_deg = (float)((int16_t)(MAKE_SHORT(regs[REG_MIN_POSITION_DEG_L],regs[REG_MIN_POSITION_DEG_H])));
+		  float const reg_max_position_deg = (float)((int16_t)(MAKE_SHORT(regs[REG_MAX_POSITION_DEG_L],regs[REG_MAX_POSITION_DEG_H])));
+		  setpoint_position_deg = fconstrain(goal_position_deg,reg_min_position_deg,reg_max_position_deg);
+		  // compute velocity setpoint from goal and EEPROM velocity limit
+		  float const goal_velocity_dps = (int16_t)(MAKE_SHORT(regs[REG_GOAL_VELOCITY_DPS_L],regs[REG_GOAL_VELOCITY_DPS_H]));
+		  float const reg_max_velocity_dps = (int16_t)(MAKE_SHORT(regs[REG_MAX_VELOCITY_DPS_L],regs[REG_MAX_VELOCITY_DPS_H]));
+		  setpoint_velocity_dps = fconstrain(goal_velocity_dps,-reg_max_velocity_dps,reg_max_velocity_dps);
+		  // compute torque feed forward
+		  float const torque_feed_forward_ma = (int16_t)(MAKE_SHORT(regs[REG_GOAL_TORQUE_CURRENT_MA_L],regs[REG_GOAL_TORQUE_CURRENT_MA_H]));
+		  // compute torque setpoint
+		  float const error_position_deg = setpoint_position_deg-positionSensor_getDegreeMultiturn();
+		  float const kp = (float)regs[REG_GOAL_KP];
+		  error_velocity_dps = ALPHA_VELOCITY*(setpoint_velocity_dps-positionSensor_getVelocityDegree())+(1.0f-ALPHA_VELOCITY)*error_velocity_dps;
+		  float const kd = (float)regs[REG_GOAL_KD]/100.0f;
+		  float const reg_reverse = regs[REG_INV_PHASE_MOTOR] == 0 ? 1.0f : -1.0f;
+		  setpoint_torque_current_mA = ALPHA_CURRENT_SETPOINT*reg_reverse*(kp*error_position_deg+kd*error_velocity_dps+torque_feed_forward_ma)
+		  							    + (1.0f-ALPHA_CURRENT_SETPOINT)*setpoint_torque_current_mA;
+		  // limit torque
+		  float const reg_max_current_ma = (uint16_t)(MAKE_SHORT(regs[REG_MAX_CURRENT_MA_L],regs[REG_MAX_CURRENT_MA_H]));
+		  setpoint_torque_current_mA = fconstrain(setpoint_torque_current_mA,-reg_max_current_ma,reg_max_current_ma);
+		  // set flux
+		  float const goal_flux_current_mA = (int16_t)(MAKE_SHORT(regs[REG_GOAL_FLUX_CURRENT_MA_L],regs[REG_GOAL_FLUX_CURRENT_MA_H]));
+		  setpoint_flux_current_mA = goal_flux_current_mA;
+		  // if target speed not reached, process field weakening :
+		  if(
+		      ( (setpoint_velocity_dps>1000.0f) && (setpoint_velocity_dps>positionSensor_getVelocityDegree()) ) ||
+		      ( (setpoint_velocity_dps<1000.0f) && (setpoint_velocity_dps<positionSensor_getVelocityDegree()) )
+		  )
+		    {
+		      float const fw = -fmax((fabsf(setpoint_velocity_dps)-1000.0f),0.0f)/(float)(regs[REG_FIELD_WEAKENING_K]+1); // FW start à 1000dps/166rpm
+		      setpoint_flux_current_mA+=fw;
+		    }
+		  break;
 //		case REG_CONTROL_MODE_POSITION_VELOCITY_TORQUE_VELOCITY_PROFIL:
 //			if(last_mode!=REG_CONTROL_MODE_POSITION_VELOCITY_TORQUE_VELOCITY_PROFIL)
 //			{
